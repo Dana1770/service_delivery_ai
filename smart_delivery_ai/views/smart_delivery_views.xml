@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ══════════════════════════════════════════
+         Sequence
+    ══════════════════════════════════════════ -->
+    <record id="seq_smart_delivery" model="ir.sequence">
+        <field name="name">Smart Delivery</field>
+        <field name="code">smart.delivery</field>
+        <field name="prefix">SD/%(year)s/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <!-- ══════════════════════════════════════════
+         List View
+    ══════════════════════════════════════════ -->
+    <record id="view_smart_delivery_list" model="ir.ui.view">
+        <field name="name">smart.delivery.list</field>
+        <field name="model">smart.delivery</field>
+        <field name="arch" type="xml">
+            <list string="Smart Deliveries"
+                  decoration-success="state == 'delivered'"
+                  decoration-danger="state == 'failed'"
+                  decoration-info="state == 'in_progress'">
+                <field name="name"/>
+                <field name="partner_id"/>
+                <field name="distance"/>
+                <field name="location_status"/>
+                <field name="signature_status"/>
+                <field name="photo_status"/>
+                <field name="state"
+                       widget="badge"
+                       decoration-success="state == 'delivered'"
+                       decoration-danger="state == 'failed'"
+                       decoration-info="state == 'in_progress'"
+                       decoration-muted="state == 'draft'"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ══════════════════════════════════════════
+         Form View
+    ══════════════════════════════════════════ -->
+    <record id="view_smart_delivery_form" model="ir.ui.view">
+        <field name="name">smart.delivery.form</field>
+        <field name="model">smart.delivery</field>
+        <field name="arch" type="xml">
+            <form string="Smart Delivery">
+
+                <!-- Status Bar -->
+                <header>
+                    <button name="action_start" string="Start Delivery" type="object"
+                            class="btn-primary"
+                            invisible="state != 'draft'"/>
+                    <button name="action_deliver" string="Confirm Delivery ✅" type="object"
+                            class="btn-success"
+                            invisible="state != 'in_progress'"/>
+                    <button name="action_fail" string="Mark as Failed ❌" type="object"
+                            class="btn-danger"
+                            invisible="state not in ('draft','in_progress')"/>
+                    <button name="action_reset" string="Reset to Draft" type="object"
+                            invisible="state not in ('delivered','failed')"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="draft,in_progress,delivered"/>
+                </header>
+
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" readonly="1"/>
+                        </h1>
+                    </div>
+
+                    <group>
+                        <field name="partner_id"/>
+                    </group>
+
+                    <notebook>
+
+                        <!-- ─── TAB 1: Location ─── -->
+                        <page string="📍 Location">
+                            <group string="Customer Address Coordinates">
+                                <field name="delivery_lat"/>
+                                <field name="delivery_lng"/>
+                            </group>
+                            <group string="Delivery Agent Current Location">
+                                <field name="current_lat" readonly="1"/>
+                                <field name="current_lng" readonly="1"/>
+                                <button string="📡 Get My Location"
+                                        type="object"
+                                        name="action_get_location_js"
+                                        class="btn-secondary"/>
+                            </group>
+                            <group string="Distance Result">
+                                <field name="distance" readonly="1"/>
+                                <field name="is_in_range" readonly="1"/>
+                                <field name="location_status" readonly="1"
+                                       widget="badge"
+                                       decoration-success="location_status == 'ok'"
+                                       decoration-danger="location_status == 'far'"
+                                       decoration-muted="location_status == 'pending'"/>
+                            </group>
+                            <footer>
+                                <button string="🔍 Check Distance"
+                                        type="object"
+                                        name="action_check_location"
+                                        class="btn-primary"/>
+                            </footer>
+                        </page>
+
+                        <!-- ─── TAB 2: Signature ─── -->
+                        <page string="✍️ Signature">
+                            <group>
+                                <group string="New Signature (Customer Signs Here)">
+                                    <field name="signature"
+                                           widget="signature"
+                                           string="Sign Here"/>
+                                </group>
+                                <group string="Reference Signature (Stored)">
+                                    <field name="saved_signature"
+                                           widget="signature"
+                                           string="Reference"/>
+                                </group>
+                            </group>
+
+                            <group string="Comparison Result">
+                                <field name="signature_match" readonly="1"/>
+                                <field name="signature_confidence" readonly="1"/>
+                                <field name="signature_status" readonly="1"
+                                       widget="badge"
+                                       decoration-success="signature_status == 'match'"
+                                       decoration-danger="signature_status == 'nomatch'"
+                                       decoration-muted="signature_status == 'pending'"/>
+                            </group>
+
+                            <footer>
+                                <button string="🤖 Compare Signatures"
+                                        type="object"
+                                        name="action_compare_signature"
+                                        class="btn-primary"/>
+                                <button string="💾 Save as Reference Signature"
+                                        type="object"
+                                        name="action_save_as_reference"
+                                        class="btn-secondary"
+                                        confirm="هل تريد حفظ التوقيع الحالي كتوقيع مرجعي؟ سيؤدي ذلك إلى استبدال التوقيع المرجعي القديم."/>
+                            </footer>
+                        </page>
+
+                        <!-- ─── TAB 3: Photo Verification ─── -->
+                        <page string="📸 Photo Verification">
+                            <group>
+                                <group string="Customer Photo (Taken at Delivery)">
+                                    <field name="customer_photo"
+                                           widget="image"
+                                           string="Delivery Photo"
+                                           options="{'size': [300, 300]}"
+                                           help="صورة يلتقطها المندوب للزبون وقت التسليم"/>
+                                </group>
+                                <group string="Reference Photo (ID / Profile)">
+                                    <field name="reference_photo"
+                                           widget="image"
+                                           string="Reference Photo"
+                                           options="{'size': [300, 300]}"
+                                           help="الصورة المرجعية المحفوظة مسبقاً للزبون"/>
+                                </group>
+                            </group>
+
+                            <group string="Photo Verification Result">
+                                <field name="photo_match" readonly="1"/>
+                                <field name="photo_confidence" readonly="1"/>
+                                <field name="photo_status" readonly="1"
+                                       widget="badge"
+                                       decoration-success="photo_status == 'match'"
+                                       decoration-danger="photo_status == 'nomatch'"
+                                       decoration-muted="photo_status == 'pending'"/>
+                            </group>
+
+                            <footer>
+                                <button string="🔍 Compare Photos"
+                                        type="object"
+                                        name="action_compare_photo"
+                                        class="btn-primary"/>
+                                <button string="💾 Save as Reference Photo"
+                                        type="object"
+                                        name="action_save_reference_photo"
+                                        class="btn-secondary"
+                                        confirm="هل تريد حفظ هذه الصورة كصورة مرجعية للزبون؟"/>
+                            </footer>
+                        </page>
+
+                    </notebook>
+                </sheet>
+
+            </form>
+        </field>
+    </record>
+
+    <!-- ══════════════════════════════════════════
+         Action
+    ══════════════════════════════════════════ -->
+    <record id="action_smart_delivery" model="ir.actions.act_window">
+        <field name="name">Smart Deliveries</field>
+        <field name="res_model">smart.delivery</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Create your first Smart Delivery!
+            </p>
+        </field>
+    </record>
+
+    <!-- ══════════════════════════════════════════
+         Menu
+    ══════════════════════════════════════════ -->
+    <menuitem id="menu_smart_delivery_root"
+              name="Smart Delivery"
+              web_icon="smart_delivery_ai,static/src/img/fountain-pen-close-up.png"
+
+              sequence="50"/>
+
+    <menuitem id="menu_smart_delivery_operations"
+              name="Operations"
+              parent="menu_smart_delivery_root"
+              action="action_smart_delivery"
+              sequence="10"/>
+
+</odoo>

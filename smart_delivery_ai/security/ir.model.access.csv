@@ -1,0 +1,3 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_smart_delivery_user,smart.delivery user,model_smart_delivery,base.group_user,1,1,1,0
+access_smart_delivery_manager,smart.delivery manager,model_smart_delivery,base.group_system,1,1,1,1
