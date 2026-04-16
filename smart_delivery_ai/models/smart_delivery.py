@@ -317,6 +317,13 @@ class SmartDelivery(models.Model):
         _logger.info(
             "Signature — pixel=%.3f jaccard=%.3f projection=%.3f density=%.3f transition=%.3f soft=%.3f combined=%.3f match=%s",
             pixel_score, jaccard, projection_score, density_score, transition_score, soft_jaccard, combined, match,
+        combined = 0.20 * pixel_score + 0.45 * jaccard + 0.25 * projection_score + 0.10 * density_score
+        confidence = round(combined * 100, 2)
+        match = combined >= 0.62
+
+        _logger.info(
+            "Signature — pixel=%.3f jaccard=%.3f projection=%.3f density=%.3f combined=%.3f match=%s",
+            pixel_score, jaccard, projection_score, density_score, combined, match,
         )
         return match, confidence
 
@@ -559,6 +566,20 @@ class SmartDelivery(models.Model):
         _logger.info(
             "Photo — hist=%.3f spatial=%.3f edge=%.3f hash=%.3f center=%.3f gray=%.3f phash=%.3f ssim=%.3f combined=%.3f match=%s",
             hist_score, spatial_score, edge_score, hash_score, center_score, gray_hist_score, phash_score, ssim_score, combined, match,
+        combined = (
+            0.20 * hist_score +
+            0.15 * spatial_score +
+            0.25 * edge_score +
+            0.20 * hash_score +
+            0.10 * center_score +
+            0.10 * gray_hist_score
+        )
+        confidence = round(combined * 100, 2)
+        match = combined >= 0.70
+
+        _logger.info(
+            "Photo — hist=%.3f spatial=%.3f edge=%.3f hash=%.3f center=%.3f gray=%.3f combined=%.3f match=%s",
+            hist_score, spatial_score, edge_score, hash_score, center_score, gray_hist_score, combined, match,
         )
         return match, confidence
 
