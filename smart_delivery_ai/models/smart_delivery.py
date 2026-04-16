@@ -3,6 +3,7 @@ import math
 import base64
 import io
 import logging
+import statistics
 
 from odoo import models, fields, api
 from odoo.exceptions import UserError
@@ -163,6 +164,10 @@ class SmartDelivery(models.Model):
         except ImportError:
             raise UserError("Pillow is not installed. Run: pip install Pillow")
 
+        if isinstance(b64, bytes):
+            b64 = b64.decode("utf-8")
+        if "," in b64 and b64.strip().startswith("data:"):
+            b64 = b64.split(",", 1)[1]
         data = base64.b64decode(b64)
         img = Image.open(io.BytesIO(data))
 
@@ -224,13 +229,27 @@ class SmartDelivery(models.Model):
         diff_sum = sum(abs(p1 - p2) for p1, p2 in zip(pixels1, pixels2))
         pixel_score = 1.0 - (diff_sum / (total * 255.0))
 
-        # Metric 2: Jaccard ink overlap
-        ink1 = {i for i, p in enumerate(pixels1) if p == INK}
-        ink2 = {i for i, p in enumerate(pixels2) if p == INK}
-        if ink1 or ink2:
-            jaccard = len(ink1 & ink2) / len(ink1 | ink2)
-        else:
-            jaccard = 1.0
+        # Metric 2: Jaccard ink overlap with best local alignment
+        ink1 = {(i % W, i // W) for i, p in enumerate(pixels1) if p == INK}
+        ink2 = {(i % W, i // W) for i, p in enumerate(pixels2) if p == INK}
+        best_jaccard = 0.0
+        for dy in range(-6, 7):
+            for dx in range(-12, 13):
+                shifted = {
+                    (x + dx, y + dy)
+                    for (x, y) in ink2
+                    if 0 <= x + dx < W and 0 <= y + dy < H
+                }
+                if not ink1 and not shifted:
+                    score = 1.0
+                elif ink1 or shifted:
+                    union = ink1 | shifted
+                    score = (len(ink1 & shifted) / len(union)) if union else 0.0
+                else:
+                    score = 0.0
+                if score > best_jaccard:
+                    best_jaccard = score
+        jaccard = best_jaccard
 
         # Metric 3: Projection profiles
         def h_profile(px, w, h):
@@ -245,13 +264,59 @@ class SmartDelivery(models.Model):
         projection_score = (prof_sim(h_profile(pixels1, W, H), h_profile(pixels2, W, H)) +
                             prof_sim(v_profile(pixels1, W, H), v_profile(pixels2, W, H))) / 2.0
 
-        combined = 0.25 * pixel_score + 0.50 * jaccard + 0.25 * projection_score
+        # Metric 4: Ink density similarity
+        density1 = len(ink1) / total
+        density2 = len(ink2) / total
+        density_score = 1.0 - min(1.0, abs(density1 - density2) / max(max(density1, density2), 1e-6))
+
+        # Metric 5: Stroke transitions (captures signature rhythm/shape)
+        def transition_profile(px, w, h):
+            horizontal = []
+            for y in range(h):
+                row = [1 if px[y * w + x] == INK else 0 for x in range(w)]
+                horizontal.append(sum(1 for i in range(1, len(row)) if row[i] != row[i - 1]) / max(w - 1, 1))
+            vertical = []
+            for x in range(w):
+                col = [1 if px[y * w + x] == INK else 0 for y in range(h)]
+                vertical.append(sum(1 for i in range(1, len(col)) if col[i] != col[i - 1]) / max(h - 1, 1))
+            return horizontal, vertical
+
+        h_t1, v_t1 = transition_profile(pixels1, W, H)
+        h_t2, v_t2 = transition_profile(pixels2, W, H)
+        transition_score = (prof_sim(h_t1, h_t2) + prof_sim(v_t1, v_t2)) / 2.0
+
+        # Metric 6: Soft overlap (tolerant to tiny pen offsets)
+        def soft_overlap(ink_a, ink_b, radius=1):
+            if not ink_a and not ink_b:
+                return 1.0
+            if not ink_a or not ink_b:
+                return 0.0
+            dilated_b = set()
+            for (x, y) in ink_b:
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < W and 0 <= ny < H:
+                            dilated_b.add((nx, ny))
+            matched = sum(1 for p in ink_a if p in dilated_b)
+            return matched / max(len(ink_a), 1)
+
+        soft_jaccard = (soft_overlap(ink1, ink2) + soft_overlap(ink2, ink1)) / 2.0
+
+        combined = (
+            0.15 * pixel_score
+            + 0.32 * jaccard
+            + 0.20 * projection_score
+            + 0.10 * density_score
+            + 0.13 * transition_score
+            + 0.10 * soft_jaccard
+        )
         confidence = round(combined * 100, 2)
-        match = combined >= 0.58
+        match = combined >= 0.66
 
         _logger.info(
-            "Signature — pixel=%.3f jaccard=%.3f projection=%.3f combined=%.3f match=%s",
-            pixel_score, jaccard, projection_score, combined, match,
+            "Signature — pixel=%.3f jaccard=%.3f projection=%.3f density=%.3f transition=%.3f soft=%.3f combined=%.3f match=%s",
+            pixel_score, jaccard, projection_score, density_score, transition_score, soft_jaccard, combined, match,
         )
         return match, confidence
 
@@ -293,7 +358,7 @@ class SmartDelivery(models.Model):
 
     def _compare_photos(self, b64_photo1, b64_photo2):
         try:
-            from PIL import Image, ImageFilter
+            from PIL import Image, ImageFilter, ImageOps
         except ImportError:
             raise UserError("Pillow is not installed. Run: pip install Pillow")
 
@@ -301,6 +366,10 @@ class SmartDelivery(models.Model):
         GRID = 8
 
         def load_photo(b64):
+            if isinstance(b64, bytes):
+                b64 = b64.decode("utf-8")
+            if "," in b64 and b64.strip().startswith("data:"):
+                b64 = b64.split(",", 1)[1]
             data = base64.b64decode(b64)
             img = Image.open(io.BytesIO(data))
             if img.mode == "RGBA":
@@ -311,6 +380,115 @@ class SmartDelivery(models.Model):
                 img = img.convert("RGB")
             img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
             return img.resize(TARGET_SIZE, Image.LANCZOS)
+
+        def grayscale_histogram_similarity(im1, im2, bins=32):
+            g1 = ImageOps.grayscale(im1)
+            g2 = ImageOps.grayscale(im2)
+            hist1 = [0] * bins
+            hist2 = [0] * bins
+            for p in g1.getdata():
+                hist1[min(bins - 1, p * bins // 256)] += 1
+            for p in g2.getdata():
+                hist2[min(bins - 1, p * bins // 256)] += 1
+            s1, s2 = sum(hist1), sum(hist2)
+            if not s1 or not s2:
+                return 0.0
+            n1 = [v / s1 for v in hist1]
+            n2 = [v / s2 for v in hist2]
+            return sum((a * b) ** 0.5 for a, b in zip(n1, n2))
+
+        def edge_similarity(im1, im2):
+            e1 = ImageOps.grayscale(im1).filter(ImageFilter.FIND_EDGES)
+            e2 = ImageOps.grayscale(im2).filter(ImageFilter.FIND_EDGES)
+            p1 = list(e1.getdata())
+            p2 = list(e2.getdata())
+            if not p1:
+                return 0.0
+            diff = sum(abs(a - b) for a, b in zip(p1, p2)) / (len(p1) * 255.0)
+            return 1.0 - diff
+
+        def dhash_similarity(im1, im2):
+            def dhash(im):
+                g = ImageOps.grayscale(im).resize((33, 32), Image.LANCZOS)
+                px = list(g.getdata())
+                bits = []
+                w = 33
+                for y in range(32):
+                    row = y * w
+                    for x in range(32):
+                        bits.append(1 if px[row + x] > px[row + x + 1] else 0)
+                return bits
+            h1 = dhash(im1)
+            h2 = dhash(im2)
+            dist = sum(1 for b1, b2 in zip(h1, h2) if b1 != b2)
+            return 1.0 - (dist / len(h1))
+
+        def phash_similarity(im1, im2, size=32, low=8):
+            def dct_1d(vector):
+                n = len(vector)
+                result = []
+                for k in range(n):
+                    coeff = 0.0
+                    for i, value in enumerate(vector):
+                        coeff += value * math.cos((math.pi / n) * (i + 0.5) * k)
+                    result.append(coeff)
+                return result
+
+            def phash_bits(image):
+                gray = ImageOps.grayscale(image).resize((size, size), Image.LANCZOS)
+                matrix = [list(gray.getdata())[r * size:(r + 1) * size] for r in range(size)]
+                rows_dct = [dct_1d(row) for row in matrix]
+                cols_dct = []
+                for c in range(size):
+                    column = [rows_dct[r][c] for r in range(size)]
+                    cols_dct.append(dct_1d(column))
+                dct2 = [[cols_dct[c][r] for c in range(size)] for r in range(size)]
+                region = []
+                for r in range(low):
+                    for c in range(low):
+                        if r == 0 and c == 0:
+                            continue
+                        region.append(dct2[r][c])
+                med = statistics.median(region) if region else 0.0
+                return [1 if v > med else 0 for v in region]
+
+            bits1 = phash_bits(im1)
+            bits2 = phash_bits(im2)
+            if not bits1:
+                return 0.0
+            hamming = sum(1 for a, b in zip(bits1, bits2) if a != b)
+            return 1.0 - (hamming / len(bits1))
+
+        def ssim_like(im1, im2):
+            g1 = list(ImageOps.grayscale(im1).getdata())
+            g2 = list(ImageOps.grayscale(im2).getdata())
+            if not g1:
+                return 0.0
+            n = len(g1)
+            mu1 = sum(g1) / n
+            mu2 = sum(g2) / n
+            var1 = sum((x - mu1) ** 2 for x in g1) / n
+            var2 = sum((x - mu2) ** 2 for x in g2) / n
+            cov = sum((a - mu1) * (b - mu2) for a, b in zip(g1, g2)) / n
+            c1 = (0.01 * 255) ** 2
+            c2 = (0.03 * 255) ** 2
+            num = (2 * mu1 * mu2 + c1) * (2 * cov + c2)
+            den = (mu1 ** 2 + mu2 ** 2 + c1) * (var1 + var2 + c2)
+            if den == 0:
+                return 0.0
+            return max(0.0, min(1.0, num / den))
+
+        def center_similarity(im1, im2):
+            w, h = im1.size
+            crop = (w // 4, h // 4, 3 * w // 4, 3 * h // 4)
+            c1 = ImageOps.grayscale(im1.crop(crop))
+            c2 = ImageOps.grayscale(im2.crop(crop))
+            p1 = list(c1.getdata())
+            p2 = list(c2.getdata())
+            if not p1:
+                return 0.0
+            diff = sum(abs(a - b) for a, b in zip(p1, p2)) / (len(p1) * 255.0)
+            return 1.0 - diff
 
         img1 = load_photo(b64_photo1)
         img2 = load_photo(b64_photo2)
@@ -347,13 +525,40 @@ class SmartDelivery(models.Model):
                     block_scores.append(1.0 - (sum(diffs) / len(diffs)))
         spatial_score = sum(block_scores) / len(block_scores) if block_scores else 0.0
 
-        combined = 0.45 * hist_score + 0.55 * spatial_score
+        # Metric 3: Edge-based structural similarity
+        edge_score = edge_similarity(img1, img2)
+
+        # Metric 4: Perceptual hash similarity (robust to minor lighting/resize changes)
+        hash_score = dhash_similarity(img1, img2)
+
+        # Metric 5: Center region similarity (focus on subject, less on background)
+        center_score = center_similarity(img1, img2)
+
+        # Metric 6: Grayscale histogram similarity for illumination stability
+        gray_hist_score = grayscale_histogram_similarity(img1, img2)
+
+        # Metric 7: pHash similarity for stronger perceptual consistency
+        phash_score = phash_similarity(img1, img2)
+
+        # Metric 8: SSIM-like structural luminance similarity
+        ssim_score = ssim_like(img1, img2)
+
+        combined = (
+            0.13 * hist_score
+            + 0.10 * spatial_score
+            + 0.18 * edge_score
+            + 0.14 * hash_score
+            + 0.08 * center_score
+            + 0.10 * gray_hist_score
+            + 0.14 * phash_score
+            + 0.13 * ssim_score
+        )
         confidence = round(combined * 100, 2)
-        match = combined >= 0.65
+        match = combined >= 0.74
 
         _logger.info(
-            "Photo — hist=%.3f spatial=%.3f combined=%.3f match=%s",
-            hist_score, spatial_score, combined, match,
+            "Photo — hist=%.3f spatial=%.3f edge=%.3f hash=%.3f center=%.3f gray=%.3f phash=%.3f ssim=%.3f combined=%.3f match=%s",
+            hist_score, spatial_score, edge_score, hash_score, center_score, gray_hist_score, phash_score, ssim_score, combined, match,
         )
         return match, confidence
 
